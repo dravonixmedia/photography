@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { gsap, ScrollTrigger } from "@/lib/gsap";
 import { scrollToTarget, useLenisRef } from "@/lib/lenis-context";
@@ -7,10 +8,14 @@ import { useIntroProgress } from "@/lib/intro-progress-context";
 import { markIntroSeen, readIntroSeen } from "@/hooks/useIntroSession";
 import { readReducedMotion } from "@/hooks/useReducedMotion";
 import { technicalFeatures } from "@/lib/content";
+import CanvasSequence, { type CanvasSequenceHandle } from "./CanvasSequence";
 import FlashTransition from "./FlashTransition";
 import IntroLoadingScreen from "./IntroLoadingScreen";
-import IntroScene3D from "./IntroScene3D";
 import TechnicalFeature from "./TechnicalFeature";
+
+const FRAME_COUNTS = {
+  opening: { desktop: 120, mobile: 120 },
+};
 
 export default function CinematicIntro() {
   // This component is only ever mounted client-side (see
@@ -37,25 +42,6 @@ export default function CinematicIntro() {
   return <FullCinematicIntro />;
 }
 
-function StaticCameraGlyph() {
-  return (
-    <svg
-      viewBox="0 0 200 140"
-      className="h-28 w-auto text-paper/25 sm:h-36"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.2"
-      aria-hidden="true"
-    >
-      <rect x="20" y="35" width="130" height="80" rx="8" />
-      <rect x="65" y="18" width="40" height="20" rx="3" />
-      <circle cx="80" cy="76" r="34" />
-      <circle cx="80" cy="76" r="20" />
-      <circle cx="150" cy="52" r="5" />
-    </svg>
-  );
-}
-
 function ReducedMotionIntro() {
   const lenisRef = useLenisRef();
 
@@ -73,13 +59,20 @@ function ReducedMotionIntro() {
 
   return (
     <section className="relative flex h-screen w-full items-center justify-center overflow-hidden bg-ink">
+      <Image
+        src="/sequences/opening/desktop/frame_0030.webp"
+        alt=""
+        fill
+        priority
+        sizes="100vw"
+        className="object-cover opacity-70"
+      />
       <div
-        className="absolute inset-0 [background:radial-gradient(60%_50%_at_50%_38%,rgba(245,242,234,0.08),transparent_70%)]"
+        className="absolute inset-0 bg-gradient-to-t from-ink via-ink/40 to-ink/70"
         aria-hidden="true"
       />
       <div className="grain-overlay" aria-hidden="true" />
       <div className="relative z-10 flex flex-col items-center gap-6 px-6 text-center">
-        <StaticCameraGlyph />
         <p className="text-[0.65rem] font-medium uppercase tracking-[0.3em] text-paper/60">
           Reyes Visual
         </p>
@@ -105,7 +98,7 @@ function FullCinematicIntro() {
 
   const sectionRef = useRef<HTMLElement | null>(null);
   const pinRef = useRef<HTMLDivElement | null>(null);
-  const sceneProgressRef = useRef(0);
+  const openingHandle = useRef<CanvasSequenceHandle | null>(null);
 
   const headline1Ref = useRef<HTMLParagraphElement | null>(null);
   const headline2Ref = useRef<HTMLParagraphElement | null>(null);
@@ -114,12 +107,10 @@ function FullCinematicIntro() {
   const featureRefs = useRef<Array<HTMLDivElement | null>>([]);
   const flashRef = useRef<HTMLDivElement | null>(null);
 
-  const [isMobile] = useState(() => typeof window !== "undefined" && window.innerWidth < 768);
-  const [sceneReady, setSceneReady] = useState(false);
-  const [sceneMounted, setSceneMounted] = useState(true);
+  const [firstFrameReady, setFirstFrameReady] = useState(false);
   const [skipVisible, setSkipVisible] = useState(true);
 
-  const handleSceneReady = useCallback(() => setSceneReady(true), []);
+  const handleFirstFrameReady = useCallback(() => setFirstFrameReady(true), []);
 
   useEffect(() => {
     if (!sectionRef.current || !pinRef.current) return;
@@ -151,20 +142,21 @@ function FullCinematicIntro() {
               introFinishedRef.current = finished;
               setScrolledPastIntro(finished);
               setSkipVisible(!finished);
-              setSceneMounted(!finished);
               if (finished) markIntroSeen();
             }
           },
         },
       });
 
-      // Single normalised 0–1 value (eased by the same scrub as everything
-      // else on this timeline) drives the entire live 3D scene — see
-      // intro-3d/Scene.tsx for how it's carved into per-beat sub-progress.
-      const sceneProgress = { v: 0 };
+      // The whole intro is one continuous filmed take — walk-in, camera
+      // reveal, push through the lens, internal tunnel, pull back out, and
+      // the filmmaker's own shutter-press flash — so a single progress
+      // value (eased by the same scrub as everything else) maps linearly
+      // across the full 120-frame sequence.
+      const openingProgress = { v: 0 };
       tl.to(
-        sceneProgress,
-        { v: 1, duration: 100, onUpdate: () => { sceneProgressRef.current = sceneProgress.v; } },
+        openingProgress,
+        { v: 1, duration: 100, onUpdate: () => openingHandle.current?.setProgress(openingProgress.v) },
         0
       );
 
@@ -209,8 +201,7 @@ function FullCinematicIntro() {
         );
       });
 
-      // ---- Scene 5: reassembly (72–84) — the 3D scene's camera simply
-      // retraces the internals corridor in reverse (see Scene.tsx keyframes) ----
+      // ---- Scene 5: reassembly / pulling back out of the lens (72–84) ----
       tl.addLabel("cameraReassembly", 72);
 
       // ---- Scene 5b/6: lens return + flash (84–100) ----
@@ -222,22 +213,25 @@ function FullCinematicIntro() {
         91
       );
 
-      // Ramps to fully opaque and *holds* — it does not fade out inside this
-      // timeline. GSAP's pin-spacer always gives the pinned element back its
-      // own natural (h-screen) height immediately after the pin releases,
-      // so there's exactly one further viewport-height of ordinary,
-      // un-scrubbed scrolling before Hero begins. A second ScrollTrigger
-      // below — scoped to precisely that trailing viewport-height via
-      // "bottom bottom" -> "bottom top" on this same section, i.e. a range
-      // that starts exactly where this timeline's pin ends — fades the
-      // flash out across it, so the handoff into Hero stays masked in white
-      // instead of briefly showing the frozen last frame scrolling past.
-      // The two triggers' active ranges never overlap, so they never fight.
-      tl.addLabel("flash", 88);
-      tl.to(flashRef.current, { autoAlpha: 1, duration: 12, ease: "power2.in" }, 88);
+      // The source footage's own shutter flash lands around 95–100% of the
+      // sequence, so the DOM flash overlay ramps in right alongside it
+      // (92–100) to reinforce/extend it, rather than washing the screen out
+      // before the in-footage flash has even started.
+      tl.addLabel("flash", 92);
+      tl.to(flashRef.current, { autoAlpha: 1, duration: 8, ease: "power2.in" }, 92);
 
       tl.addLabel("heroReveal", 100);
 
+      // Ramps to fully opaque and *holds* through the end of this timeline.
+      // GSAP's pin-spacer always gives the pinned element back its own
+      // natural (h-screen) height immediately after the pin releases, so
+      // there's exactly one further viewport-height of ordinary,
+      // un-scrubbed scrolling before Hero begins. This second, non-
+      // overlapping ScrollTrigger — scoped to precisely that trailing
+      // viewport-height via "bottom bottom" -> "bottom top" on this same
+      // section, i.e. a range that starts exactly where the pin ends —
+      // fades the flash out across it, so the handoff into Hero stays
+      // masked in white instead of briefly showing the frozen last frame.
       gsap.to(flashRef.current, {
         autoAlpha: 0,
         ease: "power1.out",
@@ -254,10 +248,10 @@ function FullCinematicIntro() {
   }, [setScrolledPastIntro]);
 
   useEffect(() => {
-    if (!sceneReady) return;
+    if (!firstFrameReady) return;
     const id = requestAnimationFrame(() => ScrollTrigger.refresh());
     return () => cancelAnimationFrame(id);
-  }, [sceneReady]);
+  }, [firstFrameReady]);
 
   const handleSkip = useCallback(() => {
     gsap.set(flashRef.current, { autoAlpha: 0 });
@@ -265,8 +259,6 @@ function FullCinematicIntro() {
     setScrolledPastIntro(true);
     introFinishedRef.current = true;
     setSkipVisible(false);
-    setSceneMounted(false);
-    setSceneReady(true); // dismiss the loader immediately if it was still waiting on the 3D scene
 
     const heroEl = document.getElementById("hero");
     if (lenisRef.current) {
@@ -281,13 +273,13 @@ function FullCinematicIntro() {
   return (
     <section id="cinematic-intro" ref={sectionRef} className="relative">
       <div ref={pinRef} className="relative h-screen w-screen overflow-hidden bg-ink">
-        {sceneMounted && (
-          <IntroScene3D
-            progressRef={sceneProgressRef}
-            isMobile={isMobile}
-            onReady={handleSceneReady}
-          />
-        )}
+        <CanvasSequence
+          ref={openingHandle}
+          sequence="opening"
+          frameCount={FRAME_COUNTS.opening}
+          className="absolute inset-0"
+          onFirstFrameReady={handleFirstFrameReady}
+        />
 
         <div className="grain-overlay" aria-hidden="true" />
 
@@ -349,7 +341,7 @@ function FullCinematicIntro() {
       </div>
 
       <FlashTransition ref={flashRef} />
-      <IntroLoadingScreen visible={!sceneReady} />
+      <IntroLoadingScreen visible={!firstFrameReady} />
     </section>
   );
 }
