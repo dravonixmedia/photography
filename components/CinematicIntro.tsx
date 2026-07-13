@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { gsap, ScrollTrigger } from "@/lib/gsap";
 import { scrollToTarget, useLenisRef } from "@/lib/lenis-context";
@@ -8,17 +7,10 @@ import { useIntroProgress } from "@/lib/intro-progress-context";
 import { markIntroSeen, readIntroSeen } from "@/hooks/useIntroSession";
 import { readReducedMotion } from "@/hooks/useReducedMotion";
 import { technicalFeatures } from "@/lib/content";
-import CanvasSequence, { type CanvasSequenceHandle } from "./CanvasSequence";
 import FlashTransition from "./FlashTransition";
 import IntroLoadingScreen from "./IntroLoadingScreen";
+import IntroScene3D from "./IntroScene3D";
 import TechnicalFeature from "./TechnicalFeature";
-
-const FRAME_COUNTS = {
-  walking: { desktop: 28, mobile: 28 },
-  lensZoom: { desktop: 22, mobile: 22 },
-  internals: { desktop: 32, mobile: 32 },
-  lensReturn: { desktop: 22, mobile: 22 },
-};
 
 export default function CinematicIntro() {
   // This component is only ever mounted client-side (see
@@ -45,6 +37,25 @@ export default function CinematicIntro() {
   return <FullCinematicIntro />;
 }
 
+function StaticCameraGlyph() {
+  return (
+    <svg
+      viewBox="0 0 200 140"
+      className="h-28 w-auto text-paper/25 sm:h-36"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      aria-hidden="true"
+    >
+      <rect x="20" y="35" width="130" height="80" rx="8" />
+      <rect x="65" y="18" width="40" height="20" rx="3" />
+      <circle cx="80" cy="76" r="34" />
+      <circle cx="80" cy="76" r="20" />
+      <circle cx="150" cy="52" r="5" />
+    </svg>
+  );
+}
+
 function ReducedMotionIntro() {
   const lenisRef = useLenisRef();
 
@@ -62,16 +73,13 @@ function ReducedMotionIntro() {
 
   return (
     <section className="relative flex h-screen w-full items-center justify-center overflow-hidden bg-ink">
-      <Image
-        src="/sequences/lens-return/desktop/frame_0022.webp"
-        alt=""
-        fill
-        priority
-        sizes="100vw"
-        className="object-cover opacity-60"
+      <div
+        className="absolute inset-0 [background:radial-gradient(60%_50%_at_50%_38%,rgba(245,242,234,0.08),transparent_70%)]"
+        aria-hidden="true"
       />
-      <div className="absolute inset-0 bg-gradient-to-t from-ink via-ink/50 to-ink/80" aria-hidden="true" />
+      <div className="grain-overlay" aria-hidden="true" />
       <div className="relative z-10 flex flex-col items-center gap-6 px-6 text-center">
+        <StaticCameraGlyph />
         <p className="text-[0.65rem] font-medium uppercase tracking-[0.3em] text-paper/60">
           Reyes Visual
         </p>
@@ -97,16 +105,7 @@ function FullCinematicIntro() {
 
   const sectionRef = useRef<HTMLElement | null>(null);
   const pinRef = useRef<HTMLDivElement | null>(null);
-
-  const walkingHandle = useRef<CanvasSequenceHandle | null>(null);
-  const lensZoomHandle = useRef<CanvasSequenceHandle | null>(null);
-  const internalsHandle = useRef<CanvasSequenceHandle | null>(null);
-  const lensReturnHandle = useRef<CanvasSequenceHandle | null>(null);
-
-  const walkWrapRef = useRef<HTMLDivElement | null>(null);
-  const lensWrapRef = useRef<HTMLDivElement | null>(null);
-  const internalsWrapRef = useRef<HTMLDivElement | null>(null);
-  const returnWrapRef = useRef<HTMLDivElement | null>(null);
+  const sceneProgressRef = useRef(0);
 
   const headline1Ref = useRef<HTMLParagraphElement | null>(null);
   const headline2Ref = useRef<HTMLParagraphElement | null>(null);
@@ -115,10 +114,12 @@ function FullCinematicIntro() {
   const featureRefs = useRef<Array<HTMLDivElement | null>>([]);
   const flashRef = useRef<HTMLDivElement | null>(null);
 
-  const [firstFrameReady, setFirstFrameReady] = useState(false);
+  const [isMobile] = useState(() => typeof window !== "undefined" && window.innerWidth < 768);
+  const [sceneReady, setSceneReady] = useState(false);
+  const [sceneMounted, setSceneMounted] = useState(true);
   const [skipVisible, setSkipVisible] = useState(true);
 
-  const handleFirstFrameReady = useCallback(() => setFirstFrameReady(true), []);
+  const handleSceneReady = useCallback(() => setSceneReady(true), []);
 
   useEffect(() => {
     if (!sectionRef.current || !pinRef.current) return;
@@ -127,21 +128,12 @@ function FullCinematicIntro() {
       const width = window.innerWidth;
       const distance = width < 768 ? 4200 : width < 1280 ? 6800 : 8400;
 
-      gsap.set([lensWrapRef.current, internalsWrapRef.current, returnWrapRef.current], {
-        autoAlpha: 0,
-      });
-      gsap.set(walkWrapRef.current, { autoAlpha: 1 });
       gsap.set(
         [headline1Ref.current, headline2Ref.current, headline3Ref.current, techHeadlineRef.current],
         { autoAlpha: 0, y: 16 }
       );
       gsap.set(featureRefs.current, { autoAlpha: 0, y: 10 });
       gsap.set(flashRef.current, { autoAlpha: 0 });
-
-      const walkProgress = { v: 0 };
-      const lensProgress = { v: 0 };
-      const internalsProgress = { v: 0 };
-      const returnProgress = { v: 0 };
 
       const tl = gsap.timeline({
         defaults: { ease: "none" },
@@ -159,20 +151,25 @@ function FullCinematicIntro() {
               introFinishedRef.current = finished;
               setScrolledPastIntro(finished);
               setSkipVisible(!finished);
+              setSceneMounted(!finished);
               if (finished) markIntroSeen();
             }
           },
         },
       });
 
-      // ---- Scenes 1–2: darkness -> approach -> camera reveal (0–35) ----
-      tl.addLabel("darkness", 0);
+      // Single normalised 0–1 value (eased by the same scrub as everything
+      // else on this timeline) drives the entire live 3D scene — see
+      // intro-3d/Scene.tsx for how it's carved into per-beat sub-progress.
+      const sceneProgress = { v: 0 };
       tl.to(
-        walkProgress,
-        { v: 1, duration: 35, onUpdate: () => walkingHandle.current?.setProgress(walkProgress.v) },
+        sceneProgress,
+        { v: 1, duration: 100, onUpdate: () => { sceneProgressRef.current = sceneProgress.v; } },
         0
       );
 
+      // ---- Scenes 1–2: darkness -> approach -> camera reveal (0–35) ----
+      tl.addLabel("darkness", 0);
       tl.to(headline1Ref.current, { autoAlpha: 1, y: 0, duration: 5 }, 2).to(
         headline1Ref.current,
         { autoAlpha: 0, y: -12, duration: 4 },
@@ -190,33 +187,9 @@ function FullCinematicIntro() {
 
       // ---- Scene 3: lens rotation + zoom (35–50) ----
       tl.addLabel("lensZoom", 35);
-      tl.to(walkWrapRef.current, { autoAlpha: 0, duration: 2 }, 34).to(
-        lensWrapRef.current,
-        { autoAlpha: 1, duration: 2 },
-        34
-      );
-      tl.to(
-        lensProgress,
-        { v: 1, duration: 15, onUpdate: () => lensZoomHandle.current?.setProgress(lensProgress.v) },
-        35
-      );
 
       // ---- Scene 4: inside the camera + technical features (50–72) ----
       tl.addLabel("insideCamera", 50);
-      tl.to(lensWrapRef.current, { autoAlpha: 0, duration: 2 }, 49).to(
-        internalsWrapRef.current,
-        { autoAlpha: 1, duration: 2 },
-        49
-      );
-      tl.to(
-        internalsProgress,
-        {
-          v: 1,
-          duration: 22,
-          onUpdate: () => internalsHandle.current?.setProgress(internalsProgress.v),
-        },
-        50
-      );
 
       tl.to(techHeadlineRef.current, { autoAlpha: 1, y: 0, duration: 3 }, 51).to(
         techHeadlineRef.current,
@@ -236,30 +209,12 @@ function FullCinematicIntro() {
         );
       });
 
-      // ---- Scene 5: reassembly (72–84), reusing the internals sequence in reverse ----
+      // ---- Scene 5: reassembly (72–84) — the 3D scene's camera simply
+      // retraces the internals corridor in reverse (see Scene.tsx keyframes) ----
       tl.addLabel("cameraReassembly", 72);
-      tl.to(
-        internalsProgress,
-        {
-          v: 0,
-          duration: 10,
-          onUpdate: () => internalsHandle.current?.setProgress(internalsProgress.v),
-        },
-        72
-      );
-      tl.to(internalsWrapRef.current, { autoAlpha: 0, duration: 2 }, 80).to(
-        returnWrapRef.current,
-        { autoAlpha: 1, duration: 2 },
-        80
-      );
 
       // ---- Scene 5b/6: lens return + flash (84–100) ----
       tl.addLabel("lensReturn", 84);
-      tl.to(
-        returnProgress,
-        { v: 1, duration: 10, onUpdate: () => lensReturnHandle.current?.setProgress(returnProgress.v) },
-        84
-      );
 
       tl.to(headline3Ref.current, { autoAlpha: 1, y: 0, duration: 3 }, 86).to(
         headline3Ref.current,
@@ -299,10 +254,10 @@ function FullCinematicIntro() {
   }, [setScrolledPastIntro]);
 
   useEffect(() => {
-    if (!firstFrameReady) return;
+    if (!sceneReady) return;
     const id = requestAnimationFrame(() => ScrollTrigger.refresh());
     return () => cancelAnimationFrame(id);
-  }, [firstFrameReady]);
+  }, [sceneReady]);
 
   const handleSkip = useCallback(() => {
     gsap.set(flashRef.current, { autoAlpha: 0 });
@@ -310,6 +265,8 @@ function FullCinematicIntro() {
     setScrolledPastIntro(true);
     introFinishedRef.current = true;
     setSkipVisible(false);
+    setSceneMounted(false);
+    setSceneReady(true); // dismiss the loader immediately if it was still waiting on the 3D scene
 
     const heroEl = document.getElementById("hero");
     if (lenisRef.current) {
@@ -324,39 +281,13 @@ function FullCinematicIntro() {
   return (
     <section id="cinematic-intro" ref={sectionRef} className="relative">
       <div ref={pinRef} className="relative h-screen w-screen overflow-hidden bg-ink">
-        <div ref={walkWrapRef} className="absolute inset-0">
-          <CanvasSequence
-            ref={walkingHandle}
-            sequence="walking"
-            frameCount={FRAME_COUNTS.walking}
-            className="absolute inset-0"
-            onFirstFrameReady={handleFirstFrameReady}
+        {sceneMounted && (
+          <IntroScene3D
+            progressRef={sceneProgressRef}
+            isMobile={isMobile}
+            onReady={handleSceneReady}
           />
-        </div>
-        <div ref={lensWrapRef} className="absolute inset-0">
-          <CanvasSequence
-            ref={lensZoomHandle}
-            sequence="lens-zoom"
-            frameCount={FRAME_COUNTS.lensZoom}
-            className="absolute inset-0"
-          />
-        </div>
-        <div ref={internalsWrapRef} className="absolute inset-0">
-          <CanvasSequence
-            ref={internalsHandle}
-            sequence="camera-internals"
-            frameCount={FRAME_COUNTS.internals}
-            className="absolute inset-0"
-          />
-        </div>
-        <div ref={returnWrapRef} className="absolute inset-0">
-          <CanvasSequence
-            ref={lensReturnHandle}
-            sequence="lens-return"
-            frameCount={FRAME_COUNTS.lensReturn}
-            className="absolute inset-0"
-          />
-        </div>
+        )}
 
         <div className="grain-overlay" aria-hidden="true" />
 
@@ -418,7 +349,7 @@ function FullCinematicIntro() {
       </div>
 
       <FlashTransition ref={flashRef} />
-      <IntroLoadingScreen visible={!firstFrameReady} />
+      <IntroLoadingScreen visible={!sceneReady} />
     </section>
   );
 }
